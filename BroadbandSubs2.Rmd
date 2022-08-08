@@ -1,0 +1,499 @@
+---
+title: "Panel Regression - Internet Subscriptions Analysis"
+author: "Ahmet Zamanis"
+output:
+  github_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+```{r}
+library(rmarkdown)
+library(tidyverse) 
+library(ggfortify)
+library(car)
+library(plm)
+library(nlcor)
+library(ggplot2)
+library(patchwork)
+library(RColorBrewer)
+library(ggthemes)
+library(hrbrthemes)
+library(extrafont) 
+options(scipen=50)
+```
+
+## Purpose
+Panel data consists of repeated measurements of the same variable across different time points, and often different groups. A typical example from the business world would be sales data over time, and across different geographical regions. 
+\
+\
+Applying a linear regression model with panel data can be misleading, due to the unobservable effects of different time points and groups that will be likely present. Other predictors' significances and effects may be biased by time and group effects. Panel regression is used to hold the unobservable effects of time and groups constant, and to isolate the actual effect of the predictor variables. This analysis aims to demonstrate such a case.
+
+## Data Preparation
+This example analysis aims to discover the global relationship between income levels, and access to broadband internet connections. The data is sourced from World Bank Open Data, and includes the two following datasets:
+
+- GDP per capita, adjusted for PPP, in 2022 dollars, between 2000-2020, for 217 countries,
+- Broadband internet subscriptions per 100 people, between 2020-2020, for 217 countries.
+
+
+The raw datasets are in wide format.
+\
+```{r}
+df_gdp <- read.csv("GDP.csv", header=TRUE, encoding="UTF-8" ) 
+
+df_net <- read.csv("broadband.csv", header=TRUE, encoding="UTF-8" ) 
+```
+
+```{r, echo=TRUE}
+df_gdp[50:53,10:13]
+```
+
+```{r, echo=TRUE}
+df_net[50:53,10:13]
+```
+
+We carry out the following data cleaning and formatting operations:
+
+- Include matching ID columns in the datasets, to merge them later,
+- Rename country and year columns,
+- Check if country names are identical for each row in both datasets,
+- Convert both datasets to long format,
+- Ensure GDP and subs columns are numeric variables,
+- Ensure country and year columns are factor variables,
+- Convert the subs column from subs per 100 people to subs per 10,000 people,
+- Convert the GDP column to GDP in thousand dollars,
+- Merge the two long datasets by the ID and year columns,
+- Remove rows with missing observations.
+
+```{r, include=FALSE}
+
+df_gdp <- df_gdp %>% mutate(ID = (1:217))
+df_net <- df_net %>% mutate(ID = (1:217))
+
+names(df_gdp)[1] <- "country"
+names(df_net)[1] <- "country"
+
+names(df_gdp)[2:22] <- c("2000", "2001", "2002", "2003",
+                         "2004", "2005", "2006", "2007", "2008", "2009", "2010",
+                         "2011", "2012", "2013", "2014", "2015", "2016", "2017",
+                         "2018", "2019", "2020")
+names(df_net)[2:22] <- c("2000", "2001", "2002", "2003",
+                         "2004", "2005", "2006", "2007", "2008", "2009", "2010",
+                         "2011", "2012", "2013", "2014", "2015", "2016", "2017",
+                         "2018", "2019", "2020")
+
+ifelse(df_gdp$country==df_net$country,"Yes","No")
+
+df_net_l <- reshape(data=df_net, idvar="ID", varying=c(2:22),
+                v.name="subs", times=c(2000:2020), direction="long")
+names(df_net_l)[3] <- "year"
+
+df_gdp_l <- reshape(data=df_gdp, idvar="ID", varying=c(2:22),
+                    v.name="GDP", times=c(2000:2020), direction="long")
+names(df_gdp_l)[3] <- "year"
+
+df_net_l$subs <- as.numeric(df_net_l$subs)
+df_gdp_l$GDP <- as.numeric(df_gdp_l$GDP)
+
+df_net_l$subs <- round((df_net_l$subs*100), 2)
+
+df_gdp_l$GDP <- round((df_gdp_l$GDP/1000), 2)
+
+df <- merge(df_net_l, df_gdp_l, by=c("ID", "year"))
+
+df <- dplyr :: select(df, -c(5))
+names(df)[3] <- "country"
+
+df <- na.omit(df)
+
+df$year <- as.factor(df$year)
+df$country <- as.factor(df$country)
+
+
+```
+
+We end up with the following long dataset with 3,324 observations, which includes:
+
+- GDP per capita, adjusted for PPP, in thousand dollars, for each country and year, excluding years with missing observations,
+- Broadband internet subs per 10,000 people, for each country and year, excluding years with missing observations.
+
+```{r, echo=TRUE}
+df[50:53,]
+```
+
+## Exploratory Analysis
+Let's summarize our dataset.\
+```{r}
+summary(df[,2:5])
+
+```
+Our panel is slightly unbalanced, due to unavailable data for some years and some countries.
+The summary statistics suggest a very right-skewed distribution for both numeric variables, especially for subs, which is expected considering how quickly the internet rose from obscurity to prevalence.\
+Let's look at the histograms and distributions for each variable.
+\
+```{r, echo=FALSE}
+df_histsubs_stats <- data.frame(
+  v=c(round(mean(df$subs), 2), 
+      c(round(median(df$subs),2)), round(max(df$subs), 2)), 
+  y=c(775, 500, 100),                                  
+  x=c(1500, 1500, 7500),
+  label=c("Mean:\n", "Median:\n", "Max:\n")             
+)
+
+histsubs <- ggplot(df) + aes(x=subs) +
+  geom_histogram(size=1, color="steelblue", fill="steelblue", bins=30, alpha=0.5) + 
+  labs(x="Broadband subs per 10k people", y="Count", 
+       title="Histogram of broadband subs per 10k people", subtitle="N=3,324") + 
+  geom_vline(xintercept=970, linetype="dashed", size=1, color="#CA0020") +
+  geom_vline(xintercept=332, linetype="dashed", size=1, color="#5E3C99") +
+  geom_vline(xintercept=7852, linetype="dashed", size=1, color="#018571") +
+  scale_y_continuous(breaks=seq(0,1500,250)) +
+  scale_x_continuous(breaks=seq(0,8000,500)) +
+  geom_text(data=df_histsubs_stats, 
+            aes(x=x, y=y, label=paste(label, v)), color=c("#CA0020","#5E3C99","#018571")) +
+  theme_bw()  
+
+histsubs
+```
+\
+Broadband subs follow a very right-skewed distribution. The mean and maximum values are much higher than the median.
+Most observations are either zero or below 500.
+\
+\
+```{r,}
+df_histGDP_stats <- data.frame(
+  v=c(round(mean(df$GDP), 2), 
+      c(round(median(df$GDP),2)), round(max(df$GDP), 2)),
+  y=c(500, 400, 100),                                  
+  x=c(35, 35, 140),
+  label=c("Mean:", "Median:", "Max:")             
+)
+
+histGDP <- ggplot(df) + aes(x=GDP) + 
+  geom_histogram(size=1, color="steelblue", fill="steelblue", bins=30, alpha=0.5) + 
+  labs(x="GDP per capita, adjusted for PPP, in 2022 $k", y="Count", 
+       title="Histogram of GDP per capita, in 2022 $k", subtitle="N=3,324") + 
+  geom_vline(xintercept=19.82, linetype="dashed", size=1, color="#CA0020") +
+  geom_vline(xintercept=12.12, linetype="dashed", size=1, color="#5E3C99") +
+  geom_vline(xintercept=153.56, linetype="dashed", size=1, color="#018571") +
+  geom_text(data=df_histGDP_stats, 
+            aes(x=x, y=y, label=paste(label, v)), color=c("#CA0020","#5E3C99","#018571")) + 
+  theme_bw() + 
+  scale_y_continuous(breaks=seq(0,800,100)) +
+  scale_x_continuous(breaks=seq(0,150,25))
+
+histGDP
+```
+\
+GDP also follows a right skewed distribution, less so compared to subs. The mean and median are less far apart, but the mean is still considerably higher, and the maximum is much higher than the median and mean.
+\
+\
+Let's plot the relationship between GDP and subs, and test their correlation.\
+```{r, echo=FALSE}
+df_yr <- df
+df_yr <- df_yr %>% mutate(df_yr, year5=ifelse(as.numeric(year)<6, "00-05",
+                                              ifelse(as.numeric(year)<11, "06-10", 
+                                                     ifelse(as.numeric(year)<16, "11-15", "16-20"))))
+df_yr$year5 <- as.factor(df_yr$year5)
+```
+
+```{r}
+dot1 <- ggplot(df_yr) + aes(x=GDP, y=subs) +
+  geom_point(stat="identity", aes(color=year5)) +
+  geom_smooth(method="gam", color="#CA0020") +
+  labs(x="GDP per capita, $k", y="Broadband subs per 10k people", 
+       title="Relationship between GDP and broadband subs, colored by 5-year groups", subtitle="N=3,324") +
+  theme_bw() +
+  scale_x_continuous(breaks=seq(0, 150, 25)) +
+  scale_y_continuous(breaks=seq(0, 8000, 1000))
+
+dot1
+```
+\
+Apparently, GDP and broadband subs both increase together until roughly 45-50k GDP, but broadband subs actually declines as GDP increases after that point. 
+
+- Intuitively, we would expect diminishing returns from increased income, in terms of internet accessibility. 
+- The decline likely not a significant cause-effect relationship, as there are very few observations at higher GDP levels. 
+- The relationship is reasonably close to a linear increase until roughly 45-50k GDP. We may consider limiting our analysis to observations with less than 45-50k GDP.
+- From the color-coded 5-year groups, we see the last 5-10 years dominantly make up the observations with high broadband subs.
+
+\
+```{r, echo=FALSE}
+cor_test1 <- cor.test(df$subs, df$GDP)
+cor_test1
+```
+
+A correlation test between GDP and subs suggests a statistically significant correlation coefficient of 0.63. There is a moderate positive correlation between GDP and subs.
+\
+\
+What about the changes in GDP and subs over the years, and across countries? We would expect large and significant effects due to these two factors. Since there are 217 countries in our dataset, we will skip plotting the relationship between country and subs/GDP, but we can plot the relationships with year.\
+```{r, echo=FALSE}
+box1 <- ggplot(df) + aes(x=year, y=subs, fill=year) +
+  geom_boxplot(fill="steelblue", width=0.5, lwd=0.75, fatten=1) +
+  stat_boxplot(geom="errorbar", width=0.5, lwd=0.75, fatten=1) +
+  labs(title="Boxplots of broadband subs by year", subtitle="N=3,324", x="Year", y="Broadband subs per 10k people") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  scale_y_continuous(breaks=seq(0, 8000, 1000)) 
+
+box1
+```
+\
+The relationship between year and subs appears to be a linear-like increase. 
+
+- Across the years, the maximum number of subs has increased much more compared to the median number of subs.
+- Before 2008-2009, there are a lot of outliers in the number of subs per year. Outliers mostly disappear afterwards. 
+  - It appears that internet usage was more concentrated in some countries before these years, and became more globally widespread afterwards.
+  
+\
+```{r, echo=FALSE}
+box2 <- ggplot(df) + aes(x=year, y=GDP, fill=year) +
+  geom_boxplot(fill="steelblue", width=0.5, lwd=0.75, fatten=1) +
+  stat_boxplot(geom="errorbar", width=0.5, lwd=0.75, fatten=1) +
+  labs(title="Boxplots of GDP by year", subtitle="N=3,324", x="Year", y="GDP per capita, $k") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  scale_y_continuous(breaks=seq(0, 150, 25)) 
+
+box2
+```
+\
+There is no clear relationship between year and GDP. The median GDP for each year is very close, except for 2000-2001 when it was slightly higher. This is likely because there is less data available for poorer countries in previous years.
+
+- There are a lot of outliers, especially after 2003, which may indicate that the income inequality between countries grew over the years.
+
+\
+What about considering broadband subs as a predictor of GDP per capita? Let's plot the relationship, this time placing subs on the X axis.
+\
+```{r, echo=FALSE}
+dot2 <- ggplot(df_yr) + aes(x=subs, y=GDP) +
+  geom_point(stat="identity", aes(color=year5)) +
+  geom_smooth(method="gam", color="#CA0020") +
+  labs(y="GDP per capita, $k", x="Broadband subs per 10k people", 
+       title="Relationship between GDP and broadband subs, colored by 5-year groups", subtitle="N=3,324") +
+  theme_bw() +
+  scale_y_continuous(breaks=seq(0, 150, 25)) +
+  scale_x_continuous(breaks=seq(0, 8000, 1000))
+
+dot2
+```
+\
+Overall, there seems to be a positive relationship that can be decently linearly approximated.
+
+- There are numerous outliers with more than roughly 50k GDP, but with low-medium numbers of broadband subs.
+- Again, the observations with higher numbers of subs are dominated by later years.
+
+## Pooled OLS Linear Regression
+
+### lm1: GDP predicting broadband subs
+
+Let's start our regression analysis by fitting a simple Pooled OLS model with GDP as the predictor, and subs as the dependent variable. Let's limit the dataset to observations with no more than 45k in GDP, as the relationship becomes unclear after this value, due to few observations.
+```{r, echo=TRUE}
+df_lm1 <- subset(df, GDP<=45)
+
+lm1 <- lm(subs ~ GDP, data=df_lm1)
+summary(lm1)
+```
+
+- The model lm1 shows GDP as a very significant predictor of subs, with a p value of 0.
+- For 1 unit ($1000) of increase in GDP per capita, the model predicts an increase of 67 in broadband subs per 10,000 people.
+- The intercept is negative, with a value of -153. This means the model predicts a negative GDP per capita for a country with zero broadband subs per 10k people. Of course, this is not realistic. The intercept comes with a high standard error of 19.
+- The maximum residuals go as high as 4080, and the minimum residuals as low as -2800. This indicates that some observations are vastly overpredicted or underpredicted. 
+
+The model explains 58% of the variance for broadband subs in our dataset.
+\
+\
+Let's test the linear model assumptions and see if our model is appropriate for this relationship.
+```{r}
+autoplot(lm1)
+```
+\
+Our model has several issues:
+
+- The pattern in the fitted vs. residuals plot suggests that larger predictions yield increasingly larger residuals, especially for predictions with negative residuals. Smaller predictions are much more accurate compared to larger ones.
+- The normality of residuals assumption is violated, especially at the highest and lowest quantiles, while middle quantiles are close to normal.
+- The scale-location plot shows an increasing pattern, which suggests the equal variance assumption is violated. As the model predicts higher values, the standardized residuals become larger. Again, smaller predictions are much more accurate compared to larger ones.
+- The residuals vs. leverage plot shows several outliers, which is expected due to the large number of outliers in both GDP and subs.
+
+Overall, the model has some issues, but after some iteration, transformations of the outcome and predictor variables didn't yield much better fits, so we will keep the model formula as it is.
+\
+\
+Let's plot the observed values of broadband subs against the values predicted by lm1, as well as the observed values of GDP.
+\
+```{r}
+fit_lm1 <- fitted(lm1)
+df_fit_lm1 <- data.frame(fitted=fit_lm1, observed=df_lm1$subs, GDP=df_lm1$GDP)
+
+#plot
+p_fit_lm1 <- ggplot(df_fit_lm1, aes(x=fitted, y=observed)) + geom_point(color="#0571B0") + theme_bw() + 
+  geom_abline(intercept=0, slope=1, color="#CA0020", size=1) + 
+  labs(subtitle="Red straight line for reference", x="Predicted broadband subs per 10k people",
+       y="Observed broadband subs per 10k people") + theme(plot.margin = unit(c(5,5,5,5), "mm"))
+```
+
+```{r}
+p_reg_lm1 <- ggplot(df_fit_lm1, aes(x=GDP, y=observed)) + geom_point(color="#0571B0") + theme_bw() + 
+  geom_smooth(method="gam", color="#FDB863", size=1) +
+  geom_smooth(method="lm", color="#CA0020", size=1) +
+  labs(x="GDP per capita, $k",
+       y="Observed broadband subs per 10k people", subtitle="Red line: Actual regression line") + theme(plot.margin = unit(c(5,5,5,5), "mm"))
+```
+
+```{r}
+p_fit_lm1 + p_reg_lm1 + plot_annotation("Broadband subs, plotted against lm1 predictions and GDP",
+                                        subtitle="N=2,954", theme=theme_bw())
+```
+\
+Overall, the model follows a decent linear approximation, but there is a high degree of error for many observations.
+
+- Some predictions are even negative, which is not possible in reality. This hints that using just GDP as a predictor of broadband subs is not a good approach.
+
+## Panel Regression
+The linear model we fit predicts subs using GDP as a predictor, but does not consider the likely effects of time and country on internet usage and subscription numbers, regardless of GDP per capita. We could do this by including year and country as dummy variables in a linear model, but we would end up with hundreds of coefficients.
+\
+\
+A common issue with panel data such as ours is autocorrelation: The correlation between the predictor variable (GDP) at a certain time point, and its different values across different time points. Let's check if this is an issue with our lm1 model:
+```{r}
+durbinWatsonTest(lm1)
+```
+The Durbin-Watson test is very significant with a p value of 0, showing a correlation coefficient of 0.81. This suggests that time has a very significant effect on GDP, and we would intuitively expect the same for country. To account for the unobservable effects of time (year variable) and groups (country variable), and estimate the true, isolated effect of GDP on subs, we can use panel regression.
+\
+\
+Fixed effects panel regression assumes that unobservable effects are specific to each group, co-vary with the predictors and all have the same constant variance. FE regression can only account for group-specific unobservable effects.
+\
+\
+Random effects panel regression assumes the unobservable effects do not co-vary with the predictors and have differing, randomly distributed means and variances. RE regression can account for both group-specific and between-groups unobservable effects.
+\
+\
+Intuitively, we would expect the unobservable effects on internet usage to be closer to the fixed effects assumptions, as the time and group effects on internet adoption are likely to also affect the GDP per capita, or be affected by it. 
+\
+\
+Let's fit one FE model and one RE model, with the same formula and data as lm1, but accounting both for year and country effects.
+```{r, echo=TRUE}
+plm1 <- plm(subs ~ GDP, data=df_lm1, index=c("country", "year"), model="within", 
+         effect="twoways")
+plm2 <- plm(subs ~ GDP, data=df_lm1, index=c("country", "year"), model="random", 
+            effect="twoways")
+```
+Let's choose between plm1, the FE model, and lm1, the Pooled OLS model, using the Chow test for poolability:
+```{r}
+pFtest(plm1, lm1)
+```
+The p-value of 0 suggests that there are highly significant unobservable effects under the FE assumptions. In other words, the slopes for the subs ~ GDP regression line are greatly different across groups and time points. We should use a FE model over a pooled OLS model.
+\
+\
+Let's evaluate plm2, the RE model, using the Lagrange multiplier:
+```{r}
+plmtest(plm2)
+```
+The p-value of 0 suggests that there are very significant unobservable effects under the RE assumptions, and we should use an RE model over a pooled OLS model.
+\
+\
+Let's check between plm1 and plm2, and decide whether to use FE or RE, using the Hausman test of endogeneity:
+```{r}
+phtest(plm1, plm2)
+```
+The p-value of 0 leads us to reject the null hypothesis: The unobservable effects of group and time co-vary along with our predictor, GDP. We should choose the FE model plm1, over the RE model plm2.
+
+### plm1: Fixed effects, two-way panel regression
+
+Let's see the results of plm2, along with the results of lm1:
+```{r, echo=TRUE}
+summary(lm1)
+```
+```{r, echo=TRUE}
+summary(plm1)
+```
+GDP is still a highly significant predictor of broadband subs, with a coefficient of 101. A 1k$ increase in GDP translates into an increase of 101 in broadband subs per 10k people.
+
+- However, the model only explains 29% of the variance in broadband subs, compared to 58% explained by lm1. As expected, the true, isolated effect of GDP is small after controlling for unobservable time and group effects.
+- The residuals of plm1 are generally smaller than those of lm1 in absolute value, though still high for some observations.
+- The standard error of GDP's coefficient is also higher in plm1, almost three times the value in lm1. The effect of GDP on broadband subs is much less certain than lm1 would assume.
+
+
+Let's plot the observed values of broadband subs, against the values predicted by plm1, and the observed GDP values. 
+\
+```{r, echo=FALSE}
+fit_plm1 <- fitted(plm1)
+df_fit_plm1 <- data.frame(fitted=fit_plm1, observed=df_lm1$subs, GDP=df_lm1$GDP)
+```
+
+```{r}
+p_fit_plm1 <- ggplot(df_fit_plm1, aes(x=fitted, y=observed)) + geom_point(color="#0571B0") + theme_bw() + 
+  geom_abline(intercept=0, slope=1, color="#CA0020", size=1) + 
+  labs(subtitle="Red straight line for reference", x="Predicted broadband subs per 10k people",
+       y="Observed broadband subs per 10k people") + theme(plot.margin = unit(c(5,5,5,5), "mm"))
+```
+
+```{r}
+p_reg_plm1 <- ggplot(df_fit_plm1, aes(x=GDP, y=observed)) + geom_point(color="#0571B0") + theme_bw() + 
+  geom_smooth(method="gam", color="#FDB863", size=1) +
+  geom_smooth(method="lm", color="#CA0020", size=1) +
+  labs(x="GDP per capita, $k",
+       y="Observed broadband subs per 10k people", subtitle="Red line: Actual regression line") + theme(plot.margin = unit(c(5,5,5,5), "mm"))
+```
+
+```{r}
+p_fit_plm1 + p_reg_plm1 + plot_annotation("Broadband subs, plotted against plm1 predictions and GDP",
+                                        subtitle="N=2,954", theme=theme_bw())
+```
+\
+The predicted vs. actual values plot is very different from lm1's plot, and indicates serious trouble. Let's compare them directly.
+\
+```{r}
+p_fit_lm1 + p_fit_plm1 + plot_annotation("Broadband subs, plotted against lm1 and plm1 predictions",
+                                        subtitle="N=2,954", theme=theme_bw())
+```
+
+- The predictions made by lm1 include very few negative values, with reasonably small absolute values. The lowest prediction made by lm1 is -119.
+- In contrast, plm1's predictions are centered around 0, with more negative predictions than positive. 
+
+```{r}
+medi <- median(df_fit_plm1$fitted)
+q10 <- quantile(df_fit_plm1$fitted, 0.1)
+q90 <- quantile(df_fit_plm1$fitted, 0.9)
+
+dens_plm1 <- ggplot(data=df_fit_plm1, aes(x=fitted)) + 
+  geom_density(fill="steelblue", color="steelblue", alpha=0.5, size=0.75) +
+  geom_vline(xintercept=medi, color="#CA0020", linetype="dashed", size=1) +
+  geom_vline(xintercept=q10, color="#FDB863", linetype="dashed", size=1) +
+  geom_vline(xintercept=q90, color="#FDB863", linetype="dashed", size=1) +
+  geom_point(aes(x=medi, y=0, color="#CA0020")) +
+  geom_point(aes(x=q10, y=0, color="#FDB863")) +
+  geom_point(aes(x=q90, y=0, color="#FDB863")) +
+  labs(title="Density plot of plm1 predicted values", subtitle="N=2,954",
+       x="Predicted broadband subs per 10k people", y="Density") +
+  scale_color_identity(name="", breaks=c("#CA0020","#FDB863"),
+                       labels=c("Median:\n-28", "10%-90% quantiles"),
+                       guide="legend") +
+  scale_x_continuous(breaks=c(-250,250,seq(-1000,1000,500))) +
+  theme_bw()
+
+dens_plm1
+```
+
+- The lowest prediction is -1313, and the highest is 1313, while 90% of predictions fall between roughly -250 and 250. The median prediction is negative, at -28. 
+- Clearly, these are very erroneous predictions. This shows that after removing the effects of year and country, GDP is actually a poor predictor of broadband subs, at least by itself.
+- The much more reasonable predictions of lm1 are because of the unobservable effects of year and country affecting the predictions, while masquerading as GDP's effects.
+
+The model summaries showed that plm1's residuals were generally lower than lm1, but this can be misleading: 
+
+- The residual is simply the distance between the prediction and the observed value. Negative predictions are intuitively wrong, but can be "closer" to the observed value, compared to a very large positive prediction. 
+- For example, if the observed value is 500, a prediction of -500 will yield a residual of -1000, while a prediction of 4000 will yield a residual of 3500.
+
+## Conclusion
+The linear model lm1 showed GDP per capita as a very significant predictor of broadband subscriptions, explaining 58% of the variance. lm1 didn't satisfy the normality of residuals assumption, but came reasonably close, which is difficult for large datasets and with high numbers of outliers. The predictions for many observations had a high degree of error.
+\
+\
+However, we suspected that year and country had significant, unobservable effects on broadband subscriptions that may bias GDP's effect as a predictor, and our suspicions were confirmed with the relevant statistical tests. 
+
+- We used a fixed effects panel regression model, plm1, to isolate the true effect of GDP, from the unobservable effects of year and country. 
+- While GDP remained as a statistically significant predictor of subscriptions, it only accounted for 29% of the variance, confirming our suspicions. The increase in broadband subscriptions are mostly due to factors other than GDP per capita. 
+- Furthermore, plm1's fitted vs. observed values plot showed us that plm1's predictions for broadband subs are centered roughly around zero, with an almost equal number of positive and negative predictions. This tells us that GDP per capita, at least by itself, is a poor predictor of broadband subs.
+
+Had we only applied a Pooled OLS linear regression model, without accounting for the effects of year and country, we would have wrongly inferred that GDP per capita explained a large proportion of the variance in broadband subscriptions, and generated reasonable predictions by itself. This shows us the importance of using panel regression, and accounting for the effects of time and groups, when working with panel data.
