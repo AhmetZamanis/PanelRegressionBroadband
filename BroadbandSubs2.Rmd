@@ -49,11 +49,11 @@ df_gdp <- read.csv("GDP.csv", header=TRUE, encoding="UTF-8" )
 df_net <- read.csv("broadband.csv", header=TRUE, encoding="UTF-8" ) 
 ```
 
-```{r, echo=TRUE}
+```{r}
 df_gdp[50:53,10:13]
 ```
 
-```{r, echo=TRUE}
+```{r}
 df_net[50:53,10:13]
 ```
 
@@ -71,24 +71,17 @@ We carry out the following data cleaning and formatting operations:
 - Remove rows with missing observations.
 
 ```{r, include=FALSE}
-
+#ID columns for merge
 df_gdp <- df_gdp %>% mutate(ID = (1:217))
 df_net <- df_net %>% mutate(ID = (1:217))
 
+#column names
 names(df_gdp)[1] <- "country"
 names(df_net)[1] <- "country"
+names(df_gdp)[2:22] <- as.character(2000:2020)
+names(df_net)[2:22] <- as.character(2000:2020)
 
-names(df_gdp)[2:22] <- c("2000", "2001", "2002", "2003",
-                         "2004", "2005", "2006", "2007", "2008", "2009", "2010",
-                         "2011", "2012", "2013", "2014", "2015", "2016", "2017",
-                         "2018", "2019", "2020")
-names(df_net)[2:22] <- c("2000", "2001", "2002", "2003",
-                         "2004", "2005", "2006", "2007", "2008", "2009", "2010",
-                         "2011", "2012", "2013", "2014", "2015", "2016", "2017",
-                         "2018", "2019", "2020")
-
-ifelse(df_gdp$country==df_net$country,"Yes","No")
-
+#long datasets
 df_net_l <- reshape(data=df_net, idvar="ID", varying=c(2:22),
                 v.name="subs", times=c(2000:2020), direction="long")
 names(df_net_l)[3] <- "year"
@@ -97,20 +90,21 @@ df_gdp_l <- reshape(data=df_gdp, idvar="ID", varying=c(2:22),
                     v.name="GDP", times=c(2000:2020), direction="long")
 names(df_gdp_l)[3] <- "year"
 
+#numeric conversions
 df_net_l$subs <- as.numeric(df_net_l$subs)
 df_gdp_l$GDP <- as.numeric(df_gdp_l$GDP)
 
+#changing numeric variable units, and rounding
 df_net_l$subs <- round((df_net_l$subs*100), 2)
-
 df_gdp_l$GDP <- round((df_gdp_l$GDP/1000), 2)
 
-df <- merge(df_net_l, df_gdp_l, by=c("ID", "year"))
+#merging the data into one dataset
+df <- merge(df_net_l, df_gdp_l, by=c("ID", "year", "country"))
 
-df <- dplyr :: select(df, -c(5))
-names(df)[3] <- "country"
-
+#remove rows with missing observations
 df <- na.omit(df)
 
+#factor conversions
 df$year <- as.factor(df$year)
 df$country <- as.factor(df$country)
 
@@ -122,7 +116,7 @@ We end up with the following long dataset with 3,324 observations, which include
 - GDP per capita, adjusted for PPP, in thousand dollars, for each country and year, excluding years with missing observations,
 - Broadband internet subs per 10,000 people, for each country and year, excluding years with missing observations.
 
-```{r, echo=TRUE}
+```{r}
 df[50:53,]
 ```
 
